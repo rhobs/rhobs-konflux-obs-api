@@ -1,4 +1,4 @@
-name: Update Submodule to Latest Tag
+name: Update Submodule and Create PR
 
 on:
   workflow_dispatch:  # Allows manual triggering
@@ -14,7 +14,8 @@ jobs:
       - name: Checkout Repository with Submodules
         uses: actions/checkout@v4
         with:
-          submodules: false  # Not updating submodules initially
+          submodules: true
+          fetch-depth: 0
 
       - name: Configure Git
         run: |
@@ -27,34 +28,39 @@ jobs:
           git fetch origin $BRANCH_NAME:$BRANCH_NAME || true
           git checkout $BRANCH_NAME || git checkout -b $BRANCH_NAME
 
-      - name: Update Submodule to Latest Tag
+      - name: Update Submodules
         run: |
-          cd thanos
-          git fetch --tags
-          LATEST_TAG=$(git describe --tags `git rev-list --tags --max-count=1`)
-          git checkout $LATEST_TAG
-          cd ../..
+          git submodule update --init --remote
+          git status
 
-      - name: Commit Changes
+      - name: Check for Changes
+        id: check_changes
         run: |
-          git add path/to/submodule
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-            exit 0
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "changes_detected=true" >> $GITHUB_ENV
           else
-            git commit -m "Update submodule to latest tag $LATEST_TAG"
+            echo "No changes in submodule. Exiting."
+            exit 0
           fi
 
+      - name: Commit Changes
+        if: env.changes_detected == 'true'
+        run: |
+          git add .
+          git commit -m "Update submodule to latest commit"
+
       - name: Push Changes
+        if: env.changes_detected == 'true'
         run: |
           git push -u origin $BRANCH_NAME
 
       - name: Create or Update Pull Request
+        if: env.changes_detected == 'true'
         uses: peter-evans/create-pull-request@v5
         with:
           branch: ${{ env.BRANCH_NAME }}
-          title: "Update Submodule to Latest Tag ${{ env.LATEST_TAG }}"
-          body: "This PR updates the submodule to the latest tag ${{ env.LATEST_TAG }}."
+          title: "Update Submodule to Latest Commit"
+          body: "This PR updates the submodule to the latest commit."
           base: main
           labels: |
             dependencies
