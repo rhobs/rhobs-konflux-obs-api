@@ -24,7 +24,7 @@ spec:
   - name: output-image
     value: quay.io/redhat-user-workloads/rhobs-mco-tenant/rhobs-konflux-obs-api:{{revision}}
   - name: dockerfile
-    value: Containerfile.obsapi
+    value: Containerfile.obs-api
   - name: build-source-image
     value: "true"
   pipelineSpec:
