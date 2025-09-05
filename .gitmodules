@@ -1,3 +1,4 @@
 [submodule "api"]
 	path = api
 	url = https://github.com/rhobs/api
+	branch = rhobs-obs-api-konflux
