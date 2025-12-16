@@ -3,19 +3,15 @@
 
 FROM quay.io/redhat-services-prod/openshift/boilerplate:image-v8.0.0 AS builder
 
-RUN dnf -y update --allowerasing && \
-dnf -y install ca-certificates tzdata git make bash && \
-update-ca-trust && \
-dnf clean all
+RUN dnf -y update --allowerasing && dnf clean all
 
 ADD api /opt
 WORKDIR /opt
 
-RUN git update-index --refresh; go mod vendor && make build
+RUN make build
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal:latest AS runner
 
-COPY --from=builder /etc/ssl/certs/ca-bundle.crt /etc/ssl/certs/
 COPY --from=builder /opt/observatorium-api /bin/observatorium-api
 COPY --from=builder /opt/LICENSE /licenses/LICENSE
 
