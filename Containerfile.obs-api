@@ -8,7 +8,10 @@ RUN dnf -y update --allowerasing && dnf clean all
 ADD api /opt
 WORKDIR /opt
 
-RUN make build
+ARG VERSION
+ENV LDFLAGS="-s -w  -X main.Version=${VERSION} -X main.Branch=main -X main.Revision=${VERSION}"
+
+RUN go build -a -ldflags "$LDFLAGS" -o observatorium-api .
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal:latest AS runner
 
