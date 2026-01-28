@@ -37,23 +37,25 @@ spec:
           - name: SNAPSHOT
             type: string
         volumes:
-          - name: credentials
+          # A volume which persists for the lifetime of the pipeline and is
+          # shared across steps.
+          - name: scratch
             emptyDir: {}
         steps:
-          # write the kubeconfig to a volume we can use in subsequent steps.
+          # Write the kubeconfig to a volume we can use in subsequent steps.
           - name: get-kubeconfig
             image: quay.io/konflux-ci/konflux-test:latest
             env:
               - name: KUBECONFIG
-                value: /credentials/kubeconfig.yml
+                value: /scratch/kubeconfig.yml
               - name: KUBECONFIG_VALUE
                 valueFrom:
                   secretKeyRef:
                     name: "$(tasks.provision-env.results.secretRef)"
                     key: kubeconfig
             volumeMounts:
-              - name: credentials
-                mountPath: /credentials
+              - name: scratch
+                mountPath: /scratch
             script: |
               #!/bin/bash
               set -euxo pipefail
@@ -68,10 +70,10 @@ spec:
               - name: SNAPSHOT
                 value: "$(params.SNAPSHOT)"
               - name: KUBECONFIG
-                value: /credentials/kubeconfig.yml
+                value: /scratch/kubeconfig.yml
             volumeMounts:
-              - name: credentials
-                mountPath: /credentials
+              - name: scratch
+                mountPath: /scratch
             script: |
               #!/bin/bash
               set -euxo pipefail
@@ -79,8 +81,195 @@ spec:
               IMAGE=$(echo "$SNAPSHOT" | jq -r '.components[0].containerImage')
               echo "Extracted image: $IMAGE"
 
-              # Future iterations will actually deploy the snapshot image and
-              # run RapiDAST against the Observatorum API.
-              #oc create deployment observatorium-api --image=$IMAGE
-              #oc wait --for=condition=Available=true deployment/observatorium-api --timeout=120s
-              #oc logs deployment/observatorium-api
+              mkdir /scratch/manifests
+
+              cat <<EOF > /scratch/manifests/00-prometheus.yaml
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: prometheus-config
+              data:
+                rules.yaml: |
+                  groups:
+                  - name: test
+                    rules:
+                    - alert: Test
+                      expr: vector(1)
+                prometheus.yaml: |
+                  global:
+                    scrape_interval: 5s
+                  scrape_configs:
+                  - job_name: prometheus
+                    static_configs:
+                    - targets: ["localhost:9090"]
+                  rule_files: [rules.yaml]
+              ---
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: prometheus
+              spec:
+                replicas: 1
+                selector:
+                  matchLabels:
+                    app.kubernetes.io/name: prometheus
+                template:
+                  metadata:
+                    labels:
+                      app.kubernetes.io/name: prometheus
+                  spec:
+                    containers:
+                    - args:
+                      - --config.file=/config/prometheus.yaml
+                      - --web.enable-remote-write-receiver
+                      ports:
+                      - containerPort: 9090
+                        name: http
+                      image: quay.io/prometheus/prometheus:v3.8.1
+                      name: prometheus
+                      volumeMounts:
+                      - name: config
+                        mountPath: /config
+                      - name: prometheus
+                        mountPath: /prometheus
+                    volumes:
+                    - configMap:
+                        name: prometheus-config
+                      name: config
+                    - emptyDir: {}
+                      name: prometheus
+              ---
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: prometheus
+              spec:
+                ports:
+                - name: http
+                  port: 9090
+                  portName: http
+              EOF
+
+              cat <<EOF > /scratch/manifests/01-observatorium-api.yaml
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: observatorium-api-config
+              data:
+                rbac.yaml: |
+                  roles:
+                  - name: read-write
+                    resources:
+                    - metrics
+                    tenants:
+                    - test
+                    permissions:
+                    - read
+                    - write
+                  roleBindings:
+                  - name: test
+                    roles:
+                    - read-write
+                    subjects:
+                    - kind: user
+                      name: anonymous
+                tenants.yaml: |
+                  tenants:
+                  - name: test
+                    id: 00000000-0000-0000-0000-000000000000
+                    authenticator:
+                      type: anonymous
+                      config: {}
+              ---
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: observatorium-api
+              spec:
+                replicas: 1
+                selector:
+                  matchLabels:
+                    app.kubernetes.io/name: observatorium-api
+                template:
+                  metadata:
+                    labels:
+                      app.kubernetes.io/name: observatorium-api
+                  spec:
+                    containers:
+                    - args:
+                      - -metrics.read.endpoint=http://example.com/
+                      - -metrics.write.endpoint=http://example.com/
+                      - -rbac.config=/config/rbac.yaml
+                      - -tenants.config=/config/tenants.yaml
+                      ports:
+                      - containerPort: 8080
+                        name: http
+                      env:
+                      - name: INSECURE_ANONYMOUS_AUTHENTICATOR_ENABLED
+                        value: "1"
+                      image: $IMAGE
+                      name: observatorium-api
+                      volumeMounts:
+                      - name: config
+                        mountPath: /config
+                    volumes:
+                    - configMap:
+                        name: observatorium-api-config
+                      name: config
+              ---
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: observatorium-api
+              spec:
+                ports:
+                - name: http
+                  port: 8080
+                  portName: http
+              EOF
+
+              echo "Applying manifests..."
+              oc apply -f /scratch/manifests/
+
+              echo "Waiting for deployments to be ready..."
+              oc wait --for=condition=Available=true deployment/prometheus --timeout=120s
+              oc wait --for=condition=Available=true deployment/observatorium-api --timeout=120s
+              oc get pods
+              oc logs deployments/prometheus
+              oc logs deployments/observatorium-api
+
+    # Run the scanner.
+    - name: rapidast-check
+      runAfter:
+      - deploy-app
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/redhatproductsecurity/rapidast
+          - name: revision
+            value: "0119197b4c18791b0947a12a449068f2b718e18c"
+          - name: pathInRepo
+            value: examples/konflux/rapidast-check.yaml
+      params:
+        - name: KUBECONFIG_SECRET
+          value: "$(tasks.provision-env.results.secretRef)"
+        - name: PORT_FORWARD_TARGETS
+          value: "deployment/observatorium-api 8080:8080"
+        - name: RAPIDAST_CONFIG_VALUE
+          value: |
+            config:
+              configVersion: 6
+
+            application:
+              shortName: rhobs-observatorium-api-main
+              url: http://127.0.0.1:8080
+
+            scanners:
+              zap:
+                apiScan:
+                  target: http://127.0.0.1:8080
+                  apis:
+                    apiUrl: http://127.0.0.1:8080/openapi.yaml
+                passiveScan:
+                  disabledRules: ""
